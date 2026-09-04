@@ -1,6 +1,6 @@
-# Tauri + React + Typescript
+# Llmao
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+This is an experimental project on optimising and bringing out the best use cases of LLM's on local device and for myself to learn and tinker around with LLM's.
 
 ## Recommended IDE Setup
 
