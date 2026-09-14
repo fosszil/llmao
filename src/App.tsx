@@ -12,7 +12,7 @@ function App() {
     setResponse("");
 
     try {
-      const res = await invoke('greet', { name: prompt });
+      const res = await invoke<string>('greet', { name: prompt });
       setResponse(res);
       setPrompt("");
     } catch (error) {
