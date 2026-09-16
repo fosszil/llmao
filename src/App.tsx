@@ -1,10 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-
-type Message = {
-  role: "User" | "AI";
-  content: string;
-}
+import ChatMessage from "./components/ChatMessage";
+import type { Message } from "./types/message";
 
 function App() {
   const [prompt, setPrompt] = useState("");
@@ -19,7 +16,7 @@ function App() {
     }
 
     const userMessage: Message = {
-      role: "User",
+      role: "user",
       content: trimmedPrompt,
     };
 
@@ -34,7 +31,7 @@ function App() {
       });
 
       const assistantMessage: Message = {
-        role: "AI",
+        role: "assistant",
         content: res,
       };
 
@@ -42,7 +39,7 @@ function App() {
     } catch (error) {
       console.error(error);
       const errorMessage: Message = {
-        role: "AI",
+        role: "assistant",
         content: "Oops, something went wrong.",
       };
       setMessages((currentMessages) => [...currentMessages, errorMessage]);
@@ -64,12 +61,10 @@ function App() {
         )}
 
         {messages.map((message, index) => (
-          <article key={index}>
-            <strong>
-              {message.role == "User" ? "You" : "AI"}
-            </strong>
-            <p>{message.content}</p>
-          </article>
+          <ChatMessage
+            key={index}
+            message={message}
+          />
         ))}
 
         {isLoading && <p>Thinking about your answer...</p>}
