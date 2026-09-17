@@ -1,0 +1,192 @@
+:root {
+  /* Design Tokens */
+  --bg-app: #0f1115;
+  --bg-surface: #181b21;
+  --bg-surface-hover: #22262e;
+  --border-subtle: #2a2e39;
+
+  --text-primary: #e6edf3;
+  --text-muted: #8b949e;
+
+  --user-bubble: #2563eb;
+  --user-text: #ffffff;
+  --assistant-bubble: #1e222b;
+  --assistant-text: #e6edf3;
+
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --radius-sm: 6px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* 1. Global / Tauri Desktop Fixes */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  overflow: hidden; /* Prevent body scrollbars in desktop windows */
+  user-select: none; /* Desktop feel: stop UI text selection */
+  -webkit-user-select: none;
+}
+
+/* 2. Chat Layout Shell */
+.chat-shell {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+/* 3. Header (Tauri Window Draggable) */
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-block: 1rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+  /* Allows moving window by dragging header if data-tauri-drag-region is added in HTML */
+}
+
+.chat-header h1,
+.chat-header .title {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.chat-header .subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* 4. Messages Container */
+.chat-messages {
+  overflow-y: auto;
+  min-height: 0; /* CRITICAL: Prevents CSS Grid item overflow bug */
+  padding-block: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overscroll-behavior: contain;
+}
+
+/* 5. Message Bubbles */
+.message {
+  max-width: 75%;
+  padding: 0.75rem 1rem;
+  font-size: 0.925rem;
+  line-height: 1.5;
+  word-break: break-word;
+  user-select: text; /* Allow users to copy message text */
+  -webkit-user-select: text;
+}
+
+.user-message {
+  align-self: flex-end;
+  background-color: var(--user-bubble);
+  color: var(--user-text);
+  border-radius: var(--radius-lg) var(--radius-lg) 2px var(--radius-lg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.assistant-message {
+  align-self: flex-start;
+  background-color: var(--assistant-bubble);
+  color: var(--assistant-text);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) 2px;
+}
+
+/* Format code blocks inside assistant output nicely */
+.assistant-message pre {
+  background: #111317;
+  padding: 0.6rem;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin-top: 0.5rem;
+}
+
+/* 6. Composer / Input Bar */
+.chat-composer {
+  padding-block: 1rem 1.25rem;
+}
+
+.composer-wrapper {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.composer-wrapper:focus-within {
+  border-color: var(--user-bubble);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+}
+
+.chat-composer textarea {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.925rem;
+  line-height: 1.4;
+  resize: none;
+  min-height: 24px;
+  max-height: 160px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.chat-composer textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.chat-composer button {
+  background: var(--user-bubble);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.chat-composer button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 7. Subtle Desktop Scrollbars */
+.chat-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
