@@ -1,0 +1,204 @@
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
+
+import numpy as np
+from llama_cpp import Llama, llama_cpp
+
+from .sampling import choose_token, softmax
+
+# Each completed conversation turn contains a user question
+# and the assistant's answer.
+History = Sequence[tuple[str, str]]
+
+
+class InferenceEngine:
+    def __init__(self, model_path: Path):
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Model not found: {model_path}")
+
+        # Llama initializes the backend, loads the GGUF weights,
+        # and creates the inference context.
+        self.model = Llama(
+            model_path=str(model_path),
+            n_ctx=2048,
+            n_batch=256,
+            n_threads=4,
+            n_gpu_layers=0,
+            verbose=False,
+        )
+
+        self.vocab = llama_cpp.llama_model_get_vocab(self.model.model)
+        self.rng = np.random.default_rng()
+
+    def tokenize(self, text: str) -> list[int]:
+        """Convert UTF-8 text into the model's token IDs."""
+        return self.model.tokenize(
+            text.encode("utf-8"),
+            add_bos=False,
+            special=True,
+        )
+
+    def get_logits(self) -> np.ndarray:
+        """Copy the latest next-token scores from llama.cpp."""
+        pointer = llama_cpp.llama_get_logits_ith(self.model.ctx, -1)
+
+        if not pointer:
+            raise RuntimeError("Unable to read model logits")
+
+        return np.ctypeslib.as_array(
+            pointer,
+            shape=(self.model.n_vocab(),),
+        ).copy()
+
+    def format_prompt(
+        self,
+        question: str,
+        history: History = (),
+    ) -> str:
+        """Format our conversation using Qwen chat markers."""
+        parts = [
+            "<|im_start|>system\n"
+            "You are a helpful, concise local AI assistant."
+            "<|im_end|>\n"
+        ]
+
+        for user_text, assistant_text in history:
+            parts.append(f"<|im_start|>user\n{user_text}<|im_end|>\n")
+            parts.append(f"<|im_start|>assistant\n{assistant_text}<|im_end|>\n")
+
+        parts.append(f"<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n")
+
+        return "".join(parts)
+
+    def prepare_tokens(
+        self,
+        question: str,
+        history: History,
+        max_new_tokens: int,
+    ) -> list[int]:
+        """Fit the conversation inside the available context."""
+
+        if not question.strip():
+            raise ValueError("Question cannot be empty")
+
+        recent_history = list(history)
+
+        while True:
+            prompt = self.format_prompt(question, recent_history)
+            tokens = self.tokenize(prompt)
+
+            required = len(tokens) + max_new_tokens
+
+            if required <= self.model.n_ctx():
+                return tokens
+
+            # Discard the oldest completed conversation turn.
+            if recent_history:
+                recent_history.pop(0)
+            else:
+                raise ValueError("Question is too long for the context window")
+
+    def inspect(self, question: str):
+        """Inspect the model's next-token predictions."""
+
+        tokens = self.prepare_tokens(question, (), 1)
+
+        self.model.reset()
+        self.model.eval(tokens)
+
+        logits = self.get_logits()
+        probabilities = softmax(logits)
+
+        top_ids = np.argsort(logits)[-5:][::-1]
+        candidates = []
+
+        for token_id in top_ids:
+            token_id = int(token_id)
+
+            token_text = self.model.detokenize(
+                [token_id],
+                prev_tokens=tokens,
+            ).decode("utf-8", errors="replace")
+
+            candidates.append(
+                (
+                    token_id,
+                    token_text,
+                    float(logits[token_id]),
+                    float(probabilities[token_id]),
+                )
+            )
+
+        return len(tokens), candidates
+
+    def generate(
+        self,
+        question: str,
+        history: History = (),
+        max_new_tokens: int = 160,
+        temperature: float = 0.0,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> Iterator[str]:
+        """Generate and stream new text from the local model."""
+
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be positive")
+
+        prompt_tokens = self.prepare_tokens(
+            question,
+            history,
+            max_new_tokens,
+        )
+
+        # Begin a fresh evaluation for this prompt.
+        self.model.reset()
+        self.model.eval(prompt_tokens)
+
+        generated_tokens = []
+        displayed_text = ""
+
+        for step in range(max_new_tokens):
+            if should_stop is not None and should_stop():
+                break
+
+            # 1. Read scores for the next token.
+            logits = self.get_logits()
+
+            # 2. Choose a token using our own sampler.
+            token_id = choose_token(
+                logits,
+                temperature=temperature,
+                top_k=40,
+                rng=self.rng,
+            )
+
+            # 3. Stop if the model produced an ending token.
+            if llama_cpp.llama_vocab_is_eog(self.vocab, token_id):
+                break
+
+            generated_tokens.append(token_id)
+
+            # 4. Detokenize the output generated so far.
+            # This avoids decoding incomplete UTF-8 sequences.
+            output_bytes = self.model.detokenize(
+                generated_tokens,
+                prev_tokens=prompt_tokens,
+            )
+
+            current_text = output_bytes.decode("utf-8", errors="ignore")
+
+            # 5. Stream only the newly available characters.
+            new_text = current_text[len(displayed_text) :]
+
+            if new_text:
+                yield new_text
+
+            displayed_text = current_text
+
+            # 6. Evaluate the chosen token to predict the next.
+            if step < max_new_tokens - 1:
+                self.model.eval([token_id])
+
+    def close(self):
+        """Release the native model and context resources."""
+        self.model.close()
