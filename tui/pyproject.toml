@@ -1,0 +1,25 @@
+[project]
+name = "tui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "aaqil", email = "kidobop@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "llama-cpp-python>=0.3.36",
+    "numpy>=2.5.4",
+    "textual>=8.2.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cpu" }
