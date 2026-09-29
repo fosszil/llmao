@@ -47,8 +47,9 @@ def main():
             engine.close()
 
     else:
-        # We'll add the TUI in the next section.
-        print("TUI not connected yet.")
+        from .ui import LabApp
+
+        LabApp(model_path=args.model).run()
 
 
 if __name__ == "__main__":
