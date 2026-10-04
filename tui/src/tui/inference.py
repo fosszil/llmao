@@ -199,6 +199,58 @@ class InferenceEngine:
             if step < max_new_tokens - 1:
                 self.model.eval([token_id])
 
+
+    def inspect_tokens(
+        self,
+        text: str,
+        special: bool = False,
+    ) -> list[tuple[int, int, str, str]]:
+        """Inspect token IDs, text previews, and raw bytes."""
+
+        token_ids = self.model.tokenize(
+            text.encode("utf-8"),
+            add_bos=False,
+            special=special,
+        )
+
+        results = []
+
+        for index, token_id in enumerate(token_ids):
+            # Decode this token independently for inspection.
+            piece = self.model.detokenize(
+                [token_id],
+                special=True,
+            )
+
+            # Backslash escaping preserves evidence of byte
+            # sequences that are not valid UTF-8 on their own.
+            preview = piece.decode(
+                "utf-8",
+                errors="backslashreplace",
+            )
+
+            results.append((
+                index,
+                token_id,
+                preview,
+                piece.hex(" "),
+            ))
+
+        return results
+
+    def round_trip(self, text: str) -> tuple[list[int], str]:
+        """Tokenize normal text and reconstruct it."""
+
+        ids = self.model.tokenize(
+            text.encode("utf-8"),
+            add_bos=False,
+            special=False,
+        )
+
+        decoded_bytes = self.model.detokenize(ids)
+
+        return ids, decoded_bytes.decode("utf-8")
+
     def close(self):
         """Release the native model and context resources."""
         self.model.close()
