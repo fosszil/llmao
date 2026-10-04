@@ -5,6 +5,7 @@ import numpy as np
 from llama_cpp import Llama, llama_cpp
 
 from .sampling import choose_token, softmax
+from .tokenization import ContextPlan, plan_context
 
 # Each completed conversation turn contains a user question
 # and the assistant's answer.
@@ -29,6 +30,7 @@ class InferenceEngine:
 
         self.vocab = llama_cpp.llama_model_get_vocab(self.model.model)
         self.rng = np.random.default_rng()
+        self.last_plan: ContextPlan | None = None
 
     def tokenize(self, text: str) -> list[int]:
         """Convert UTF-8 text into the model's token IDs."""
@@ -70,38 +72,31 @@ class InferenceEngine:
 
         return "".join(parts)
 
+
     def prepare_tokens(
         self,
         question: str,
         history: History,
         max_new_tokens: int,
-    ) -> list[int]:
-        """Fit the conversation inside the available context."""
+    ) -> ContextPlan:
+        """Create a prompt and reserve space for generation."""
 
-        if not question.strip():
-            raise ValueError("Question cannot be empty")
+        return plan_context(
+            question=question,
+            history=history,
+            context_limit=self.model.n_ctx(),
+            output_reserve=max_new_tokens,
+            tokenize=self.tokenize,
+            format_prompt=self.format_prompt,
+        )
 
-        recent_history = list(history)
-
-        while True:
-            prompt = self.format_prompt(question, recent_history)
-            tokens = self.tokenize(prompt)
-
-            required = len(tokens) + max_new_tokens
-
-            if required <= self.model.n_ctx():
-                return tokens
-
-            # Discard the oldest completed conversation turn.
-            if recent_history:
-                recent_history.pop(0)
-            else:
-                raise ValueError("Question is too long for the context window")
 
     def inspect(self, question: str):
         """Inspect the model's next-token predictions."""
 
-        tokens = self.prepare_tokens(question, (), 1)
+        tokens = self.prepare_tokens(
+            question, (), 1
+        ).token_ids
 
         self.model.reset()
         self.model.eval(tokens)
@@ -144,11 +139,16 @@ class InferenceEngine:
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
 
-        prompt_tokens = self.prepare_tokens(
+        self.last_plan = None
+
+        plan = self.prepare_tokens(
             question,
             history,
             max_new_tokens,
         )
+
+        self.last_plan = plan
+        prompt_tokens = plan.token_ids
 
         # Begin a fresh evaluation for this prompt.
         self.model.reset()
