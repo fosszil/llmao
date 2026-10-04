@@ -1,20 +1,20 @@
-
 from pathlib import Path
 from threading import Event
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Log, Static, Footer
+from textual.widgets import Footer, Input, Log, Static
 
 from .inference import InferenceEngine
 
 
 class LabApp(App):
     CSS = """
-    Log {
-        height: 1fr;
-        border: round $primary;
-    }
+    Screen { background: $background; }
+    #status { height: 1; color: $text-muted; padding: 0 2; }
+    #chat { height: 1fr; padding: 1 2; }
+    Input { margin: 0 1 1 1; border: none; background: $surface; }
+    Input:focus { border: none; }
     """
 
     BINDINGS = [
@@ -24,86 +24,62 @@ class LabApp(App):
 
     def __init__(self, model_path: Path):
         super().__init__()
-
         self.model_path = model_path
         self.engine = None
         self.history = []
         self.parts = []
-
         self.temp = 0.0
         self.busy = True
         self.stop_event = Event()
 
     def compose(self) -> ComposeResult:
-        yield Static("Loading...", id="status")
-        yield Log(id="chat")
-        yield Input(
-            placeholder="Ask something...",
-            disabled=True,
-        )
+        yield Static("Loading model...", id="status")
+        yield Log(id="chat", auto_scroll=True)
+        yield Input(placeholder="Ask anything...", disabled=True)
         yield Footer()
 
     def on_mount(self):
         self.load_model()
 
+    def status(self, message):
+        self.query_one("#status", Static).update(f"{message}  |  Temp {self.temp}")
+
     @work(thread=True)
     def load_model(self):
         try:
             engine = InferenceEngine(self.model_path)
-            self.call_from_thread(
-                self.model_ready, engine
-            )
+            self.call_from_thread(self.model_ready, engine)
         except Exception as e:
-            self.call_from_thread(
-                self.show_error, str(e)
-            )
+            self.call_from_thread(self.status, f"Error: {e}")
 
     def model_ready(self, engine):
         self.engine = engine
         self.busy = False
+        self.status("Ready")
+        self.query_one(Input).disabled = False
+        self.query_one(Input).focus()
 
-        self.set_status("Ready")
-
-        prompt = self.query_one(Input)
-        prompt.disabled = False
-        prompt.focus()
-
-    def show_error(self, message):
-        self.set_status(f"Error: {message}")
-
-    def set_status(self, message):
-        self.query_one(Static).update(
-            f"{message} | Temp: {self.temp}"
-        )
-
-    def on_input_submitted(self, event):
-        text = event.value.strip()
+    def on_input_submitted(self, event: Input.Submitted):
+        raw = event.value
+        text = raw.strip()
         event.input.value = ""
 
         if not text or self.busy:
             return
 
         if text.startswith("/"):
-            self.handle_command(text)
+            self.command(text, raw)
             return
 
         self.busy = True
         event.input.disabled = True
-
         self.parts = []
         self.stop_event.clear()
 
-        self.query_one(Log).write(
-            f"\nYOU: {text}\nAI: "
-        )
+        self.query_one(Log).write(f"\n> {text}\n\n")
+        self.generate(text, list(self.history), self.temp)
 
-        self.generate(
-            text,
-            list(self.history),
-            self.temp,
-        )
-
-    def handle_command(self, text):
+    def command(self, text, raw):
         log = self.query_one(Log)
 
         if text == "/clear":
@@ -111,24 +87,38 @@ class LabApp(App):
             log.clear()
 
         elif text == "/help":
-            log.write_line(
-                "/clear, /temp 0.7, /help"
-            )
+            log.write_line("/clear  /help  /temp 0.7  /tokens TEXT  /context")
 
         elif text.startswith("/temp "):
             try:
                 value = float(text.split()[1])
                 if not 0 <= value <= 2:
                     raise ValueError
-
                 self.temp = value
-                self.set_status("Ready")
+                self.status("Ready")
+            except ValueError:
+                log.write_line("Temperature must be 0 to 2")
 
-            except (ValueError, IndexError):
-                log.write_line("Use /temp 0 to 2")
+        elif text.startswith("/tokens "):
+            rows = self.engine.inspect_tokens(raw[len("/tokens ") :])
+            log.write_line(f"\n{len(rows)} tokens")
+
+            for index, token_id, piece, _ in rows:
+                log.write_line(f"{index:3}  {token_id:8}  {piece!r}")
+
+        elif text == "/context":
+            limit = self.engine.model.n_ctx()
+            prompt = self.engine.format_prompt("", self.history)
+            used = len(self.engine.tokenize(prompt))
+            remaining = limit - used - 160
+
+            log.write_line(
+                f"\nContext: {used}/{limit} tokens "
+                f"| Available for next question: {remaining}"
+            )
 
         else:
-            log.write_line("Unknown command")
+            log.write_line("Unknown command. Try /help")
 
     @work(thread=True)
     def generate(self, question, history, temp):
@@ -141,16 +131,11 @@ class LabApp(App):
                 temperature=temp,
                 should_stop=self.stop_event.is_set,
             ):
-                self.call_from_thread(
-                    self.add_chunk, chunk
-                )
-
+                self.call_from_thread(self.add_chunk, chunk)
         except Exception as e:
             error = str(e)
 
-        self.call_from_thread(
-            self.finish, question, error
-        )
+        self.call_from_thread(self.finish, question, error)
 
     def add_chunk(self, chunk):
         self.parts.append(chunk)
@@ -161,30 +146,29 @@ class LabApp(App):
 
         if error:
             log.write(f"\nError: {error}")
-
         elif self.stop_event.is_set():
             log.write("\n[Stopped]")
-
         else:
             answer = "".join(self.parts)
             if answer:
-                self.history.append(
-                    (question, answer)
-                )
+                # Keep history consistent with the context planner.
+                plan = self.engine.last_plan
+                if plan and plan.dropped_turns:
+                    del self.history[: plan.dropped_turns]
+                    log.write(f"\n[{plan.dropped_turns} old turns removed]")
+
+                self.history.append((question, answer))
 
         log.write("\n")
-
         self.busy = False
-        self.set_status("Ready")
-
-        prompt = self.query_one(Input)
-        prompt.disabled = False
-        prompt.focus()
+        self.status("Ready")
+        self.query_one(Input).disabled = False
+        self.query_one(Input).focus()
 
     def action_stop(self):
         if self.busy and self.engine:
             self.stop_event.set()
-            self.set_status("Stopping...")
+            self.status("Stopping...")
 
     def on_unmount(self):
         self.stop_event.set()
