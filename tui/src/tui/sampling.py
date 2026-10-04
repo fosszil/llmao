@@ -22,8 +22,8 @@ def choose_token(
 ) -> int:
     """Select a token using greedy or top-k sampling."""
 
-    if temperature < 0:
-        raise ValueError("Temperature cannot be negative")
+    if not np.isfinite(temperature) or temperature < 0:
+        raise ValueError("Temperature must be finite and non-negative")
 
     if top_k < 1:
         raise ValueError("top_k must be at least 1")
@@ -42,12 +42,14 @@ def choose_token(
         logits, -k
     )[-k:]
 
-    candidate_logits = logits[candidate_ids]
+    candidate_logits = np.asarray(logits[candidate_ids], dtype=np.float64)
 
     # Temperature changes the distribution's sharpness.
-    probabilities = softmax(
-        candidate_logits / temperature
-    )
+    # Shift before scaling so tiny temperatures cannot overflow to +inf.
+    # Very unlikely candidates may become -inf, which gives probability zero.
+    with np.errstate(over="ignore"):
+        scaled_logits = (candidate_logits - candidate_logits.max()) / temperature
+    probabilities = softmax(scaled_logits)
 
     # Draw a random token using the computed probabilities.
     selected = rng.choice(

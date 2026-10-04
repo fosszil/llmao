@@ -60,7 +60,7 @@ class LabApp(App):
         self.query_one(Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted):
-        raw = event.value
+        raw = event.value.lstrip()
         text = raw.strip()
         event.input.value = ""
 
@@ -91,7 +91,7 @@ class LabApp(App):
 
         elif text.startswith("/temp "):
             try:
-                value = float(text.split()[1])
+                value = float(text[len("/temp ") :])
                 if not 0 <= value <= 2:
                     raise ValueError
                 self.temp = value
@@ -99,7 +99,7 @@ class LabApp(App):
             except ValueError:
                 log.write_line("Temperature must be 0 to 2")
 
-        elif text.startswith("/tokens "):
+        elif raw.startswith("/tokens "):
             rows = self.engine.inspect_tokens(raw[len("/tokens ") :])
             log.write_line(f"\n{len(rows)} tokens")
 
@@ -114,8 +114,10 @@ class LabApp(App):
 
             log.write_line(
                 f"\nContext: {used}/{limit} tokens "
-                f"| Available for next question: {remaining}"
+                f"| Available for next question: {max(0, remaining)}"
             )
+            if remaining < 0:
+                log.write_line("Old conversation turns will be trimmed for the next question.")
 
         else:
             log.write_line("Unknown command. Try /help")
