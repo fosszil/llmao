@@ -4,37 +4,21 @@ from threading import Event
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.widgets import Footer, Header, Input, Log, Static
+from textual.widgets import Input, Log, Static, Footer
 
 from .inference import InferenceEngine
 
 
 class LabApp(App):
-    TITLE = "LLM Lab"
-
     CSS = """
-    Screen {
-        layout: vertical;
-    }
-
-    #status {
-        height: 3;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    #chat {
+    Log {
         height: 1fr;
         border: round $primary;
-    }
-
-    #prompt {
-        height: 3;
     }
     """
 
     BINDINGS = [
-        ("escape", "stop", "Stop generation"),
+        ("escape", "stop", "Stop"),
         ("ctrl+q", "quit", "Quit"),
     ]
 
@@ -42,210 +26,165 @@ class LabApp(App):
         super().__init__()
 
         self.model_path = model_path
-        self.engine: InferenceEngine | None = None
+        self.engine = None
+        self.history = []
+        self.parts = []
 
-        # Store completed conversation turns in memory.
-        self.history: list[tuple[str, str]] = []
-
-        self.response_parts: list[str] = []
-        self.temperature = 0.0
+        self.temp = 0.0
         self.busy = True
-
-        # A thread-safe signal used to stop generation.
         self.stop_event = Event()
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static("Loading model...", id="status")
-        yield Log(id="chat", auto_scroll=True)
+        yield Static("Loading...", id="status")
+        yield Log(id="chat")
         yield Input(
-            placeholder="Ask your local model...",
-            id="prompt",
+            placeholder="Ask something...",
             disabled=True,
         )
         yield Footer()
 
     def on_mount(self):
-        self.load_engine()
+        self.load_model()
 
     @work(thread=True)
-    def load_engine(self):
-        """Load the model without blocking the UI."""
+    def load_model(self):
         try:
             engine = InferenceEngine(self.model_path)
-        except Exception as error:
             self.call_from_thread(
-                self.model_failed, str(error)
+                self.model_ready, engine
             )
-        else:
-            self.call_from_thread(self.model_ready, engine)
+        except Exception as e:
+            self.call_from_thread(
+                self.show_error, str(e)
+            )
 
-    def model_ready(self, engine: InferenceEngine):
+    def model_ready(self, engine):
         self.engine = engine
         self.busy = False
 
-        self.query_one("#status", Static).update(
-            "Ready | temperature=0.0 | /help for commands"
-        )
+        self.set_status("Ready")
 
-        self.query_one("#chat", Log).write_line(
-            "Model loaded. Start chatting!\n"
-        )
-
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one(Input)
         prompt.disabled = False
         prompt.focus()
 
-    def model_failed(self, message: str):
-        self.query_one("#status", Static).update(
-            f"Model loading failed: {message}"
+    def show_error(self, message):
+        self.set_status(f"Error: {message}")
+
+    def set_status(self, message):
+        self.query_one(Static).update(
+            f"{message} | Temp: {self.temp}"
         )
 
-    def on_input_submitted(self, event: Input.Submitted):
-        """Handle a question or a built-in command."""
-
-        if self.busy:
-            return
-
-        question = event.value.strip()
+    def on_input_submitted(self, event):
+        text = event.value.strip()
         event.input.value = ""
 
-        if not question:
+        if not text or self.busy:
             return
 
-        log = self.query_one("#chat", Log)
-
-        if question == "/clear":
-            self.history.clear()
-            log.clear()
-            log.write_line("Conversation cleared.")
+        if text.startswith("/"):
+            self.handle_command(text)
             return
 
-        if question == "/help":
-            log.write_line(
-                "Commands: /help, /clear, /temp NUMBER"
-            )
-            log.write_line(
-                "Escape stops generation. Ctrl+Q quits."
-            )
-            return
-
-        if question.startswith("/temp "):
-            try:
-                value = float(question.split()[1])
-
-                if not 0 <= value <= 2:
-                    raise ValueError
-
-            except (ValueError, IndexError):
-                log.write_line(
-                    "Temperature must be between 0 and 2."
-                )
-                return
-
-            self.temperature = value
-
-            self.query_one("#status", Static).update(
-                f"Ready | temperature={value}"
-            )
-            return
-
-        if question.startswith("/"):
-            log.write_line("Unknown command. Try /help.")
-            return
-
-        # Only one inference request may use this context at a time.
         self.busy = True
         event.input.disabled = True
 
-        self.response_parts = []
+        self.parts = []
         self.stop_event.clear()
 
-        log.write(f"\nYOU: {question}\nAI: ")
+        self.query_one(Log).write(
+            f"\nYOU: {text}\nAI: "
+        )
 
-        # Pass a snapshot of the previous conversation.
-        self.generate_reply(question, list(self.history))
+        self.generate(
+            text,
+            list(self.history),
+            self.temp,
+        )
+
+    def handle_command(self, text):
+        log = self.query_one(Log)
+
+        if text == "/clear":
+            self.history.clear()
+            log.clear()
+
+        elif text == "/help":
+            log.write_line(
+                "/clear, /temp 0.7, /help"
+            )
+
+        elif text.startswith("/temp "):
+            try:
+                value = float(text.split()[1])
+                if not 0 <= value <= 2:
+                    raise ValueError
+
+                self.temp = value
+                self.set_status("Ready")
+
+            except (ValueError, IndexError):
+                log.write_line("Use /temp 0 to 2")
+
+        else:
+            log.write_line("Unknown command")
 
     @work(thread=True)
-    def generate_reply(
-        self,
-        question: str,
-        history: list[tuple[str, str]],
-    ):
-        """Run blocking inference in a background thread."""
-
-        assert self.engine is not None
-
-        error_message = None
+    def generate(self, question, history, temp):
+        error = None
 
         try:
             for chunk in self.engine.generate(
                 question,
                 history=history,
-                temperature=self.temperature,
+                temperature=temp,
                 should_stop=self.stop_event.is_set,
             ):
-                # Widget updates must run on Textual's UI thread.
                 self.call_from_thread(
-                    self.append_chunk, chunk
+                    self.add_chunk, chunk
                 )
 
-        except Exception as error:
-            error_message = str(error)
+        except Exception as e:
+            error = str(e)
 
         self.call_from_thread(
-            self.finish_reply,
-            question,
-            error_message,
-            self.stop_event.is_set(),
+            self.finish, question, error
         )
 
-    def append_chunk(self, chunk: str):
-        """Display new text and remember it for conversation history."""
+    def add_chunk(self, chunk):
+        self.parts.append(chunk)
+        self.query_one(Log).write(chunk)
 
-        self.response_parts.append(chunk)
-        self.query_one("#chat", Log).write(chunk)
+    def finish(self, question, error):
+        log = self.query_one(Log)
 
-    def finish_reply(
-        self,
-        question: str,
-        error_message: str | None,
-        stopped: bool,
-    ):
-        log = self.query_one("#chat", Log)
-        response = "".join(self.response_parts)
+        if error:
+            log.write(f"\nError: {error}")
 
-        if error_message:
-            log.write(f"\nError: {error_message}")
-
-        elif stopped:
-            log.write("\n[Generation stopped]")
+        elif self.stop_event.is_set():
+            log.write("\n[Stopped]")
 
         else:
-            # Only completed answers enter conversation history.
-            if response:
-                self.history.append((question, response))
+            answer = "".join(self.parts)
+            if answer:
+                self.history.append(
+                    (question, answer)
+                )
 
         log.write("\n")
 
         self.busy = False
+        self.set_status("Ready")
 
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one(Input)
         prompt.disabled = False
         prompt.focus()
 
-        self.query_one("#status", Static).update(
-            f"Ready | temperature={self.temperature}"
-        )
-
     def action_stop(self):
-        """Request cancellation without interrupting native code."""
-        if self.busy and self.engine is not None:
+        if self.busy and self.engine:
             self.stop_event.set()
-            self.query_one("#status", Static).update(
-                "Stopping generation..."
-            )
+            self.set_status("Stopping...")
 
     def on_unmount(self):
-        # Signal the worker to stop when the UI is shutting down.
         self.stop_event.set()
