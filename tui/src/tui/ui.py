@@ -1,3 +1,4 @@
+
 from pathlib import Path
 from threading import Event
 
@@ -5,6 +6,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Input, Log, Static
 
+from .embeddings import EmbeddingEngine
 from .inference import InferenceEngine
 
 
@@ -22,14 +24,20 @@ class LabApp(App):
         ("ctrl+q", "quit", "Quit"),
     ]
 
-    def __init__(self, model_path: Path):
+    def __init__(self, model_path: Path, embedding_model_path: Path):
         super().__init__()
+
         self.model_path = model_path
+        self.embedding_model_path = embedding_model_path
+
         self.engine = None
+        self.embedder = None
         self.history = []
         self.parts = []
+
         self.temp = 0.0
         self.busy = True
+        self.embedding_active = False
         self.stop_event = Event()
 
     def compose(self) -> ComposeResult:
@@ -42,7 +50,9 @@ class LabApp(App):
         self.load_model()
 
     def status(self, message):
-        self.query_one("#status", Static).update(f"{message}  |  Temp {self.temp}")
+        self.query_one("#status", Static).update(
+            f"{message} | Temp {self.temp}"
+        )
 
     @work(thread=True)
     def load_model(self):
@@ -54,10 +64,20 @@ class LabApp(App):
 
     def model_ready(self, engine):
         self.engine = engine
+        self.finish_job()
+
+    def start_job(self, message):
+        self.busy = True
+        self.query_one(Input).disabled = True
+        self.status(message)
+
+    def finish_job(self):
         self.busy = False
         self.status("Ready")
-        self.query_one(Input).disabled = False
-        self.query_one(Input).focus()
+
+        prompt = self.query_one(Input)
+        prompt.disabled = False
+        prompt.focus()
 
     def on_input_submitted(self, event: Input.Submitted):
         raw = event.value.lstrip()
@@ -71,8 +91,7 @@ class LabApp(App):
             self.command(text, raw)
             return
 
-        self.busy = True
-        event.input.disabled = True
+        self.start_job("Generating...")
         self.parts = []
         self.stop_event.clear()
 
@@ -87,24 +106,33 @@ class LabApp(App):
             log.clear()
 
         elif text == "/help":
-            log.write_line("/clear  /help  /temp 0.7  /tokens TEXT  /context")
+            log.write_line(
+                "/clear  /help  /temp 0.7  /tokens TEXT"
+                "  /context  /embed TEXT"
+            )
 
         elif text.startswith("/temp "):
             try:
-                value = float(text[len("/temp ") :])
+                value = float(text[len("/temp "):])
                 if not 0 <= value <= 2:
                     raise ValueError
+
                 self.temp = value
                 self.status("Ready")
             except ValueError:
                 log.write_line("Temperature must be 0 to 2")
 
-        elif raw.startswith("/tokens "):
-            rows = self.engine.inspect_tokens(raw[len("/tokens ") :])
-            log.write_line(f"\n{len(rows)} tokens")
+        elif text.startswith("/tokens "):
+            try:
+                rows = self.engine.inspect_tokens(raw[len("/tokens "):])
+                log.write_line(f"\n{len(rows)} tokens")
 
-            for index, token_id, piece, _ in rows:
-                log.write_line(f"{index:3}  {token_id:8}  {piece!r}")
+                for index, token_id, piece, _ in rows:
+                    log.write_line(
+                        f"{index:3}  {token_id:8}  {piece!r}"
+                    )
+            except Exception as e:
+                log.write_line(f"Tokenization error: {e}")
 
         elif text == "/context":
             limit = self.engine.model.n_ctx()
@@ -113,11 +141,25 @@ class LabApp(App):
             remaining = limit - used - 160
 
             log.write_line(
-                f"\nContext: {used}/{limit} tokens "
-                f"| Available for next question: {max(0, remaining)}"
+                f"\nContext: {used}/{limit} tokens"
+                f" | Room for next question: {remaining}"
             )
+
             if remaining < 0:
-                log.write_line("Old conversation turns will be trimmed for the next question.")
+                log.write_line(
+                    "Older turns may need to be trimmed."
+                )
+
+        elif text == "/embed" or text.startswith("/embed "):
+            source = raw[len("/embed"):].strip()
+
+            if not source:
+                log.write_line("Usage: /embed TEXT")
+                return
+
+            self.embedding_active = True
+            self.start_job("Embedding...")
+            self.create_embedding(source)
 
         else:
             log.write_line("Unknown command. Try /help")
@@ -148,27 +190,58 @@ class LabApp(App):
 
         if error:
             log.write(f"\nError: {error}")
+
         elif self.stop_event.is_set():
             log.write("\n[Stopped]")
+
         else:
             answer = "".join(self.parts)
+
             if answer:
-                # Keep history consistent with the context planner.
                 plan = self.engine.last_plan
+
                 if plan and plan.dropped_turns:
-                    del self.history[: plan.dropped_turns]
-                    log.write(f"\n[{plan.dropped_turns} old turns removed]")
+                    del self.history[:plan.dropped_turns]
+                    log.write(
+                        f"\n[{plan.dropped_turns} old turns removed]"
+                    )
 
                 self.history.append((question, answer))
 
         log.write("\n")
-        self.busy = False
-        self.status("Ready")
-        self.query_one(Input).disabled = False
-        self.query_one(Input).focus()
+        self.finish_job()
+
+    @work(thread=True)
+    def create_embedding(self, text):
+        try:
+            # Load only on the first embedding request.
+            if self.embedder is None:
+                self.embedder = EmbeddingEngine(
+                    self.embedding_model_path
+                )
+
+            vector = self.embedder.embed(text)
+
+            result = (
+                f"\nEmbedding: {text}\n"
+                f"Dimensions: {len(vector)}\n"
+                f"First 8: {vector[:8].round(4)}\n"
+                f"Norm: {float(vector @ vector) ** 0.5:.4f}"
+            )
+
+        except Exception as e:
+            result = f"Embedding error: {e}"
+
+        self.call_from_thread(self.embedding_done, result)
+
+    def embedding_done(self, result):
+        self.query_one(Log).write_line(result)
+        self.embedding_active = False
+        self.finish_job()
 
     def action_stop(self):
-        if self.busy and self.engine:
+        # Escape only stops text generation, not embeddings.
+        if self.busy and self.engine and not self.embedding_active:
             self.stop_event.set()
             self.status("Stopping...")
 
