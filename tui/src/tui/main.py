@@ -1,14 +1,12 @@
-
 import argparse
 from pathlib import Path
 
+from .embeddings import EmbeddingEngine
 from .inference import InferenceEngine
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Local LLM learning application"
-    )
+    parser = argparse.ArgumentParser(description="Local LLM learning application")
 
     parser.add_argument(
         "--model",
@@ -18,6 +16,15 @@ def main():
     )
 
     commands = parser.add_subparsers(dest="command")
+
+
+    parser.add_argument(
+        "--embedding-model",
+        type=Path,
+        default=Path("models/bge-small.gguf"),
+        help="Path to the embedding GGUF model",
+    )
+
 
     inspect_parser = commands.add_parser(
         "inspect",
@@ -40,6 +47,13 @@ def main():
         action="store_true",
         help="Recognize supported special token markers",
     )
+
+    embed_parser = commands.add_parser(
+        "embed",
+        help="Turn text into an embedding vector",
+    )
+    embed_parser.add_argument("text")
+
 
     args = parser.parse_args()
 
@@ -72,19 +86,27 @@ def main():
             )
 
             print(f"Characters: {len(args.text)}")
-            print(
-                f"UTF-8 bytes: "
-                f"{len(args.text.encode('utf-8'))}"
-            )
+            print(f"UTF-8 bytes: {len(args.text.encode('utf-8'))}")
             print(f"Tokens: {len(rows)}\n")
 
             for index, token_id, preview, hex_bytes in rows:
-                print(
-                    f"{index:3} | "
-                    f"{token_id:8} | "
-                    f"{preview!r:18} | "
-                    f"{hex_bytes}"
-                )
+                print(f"{index:3} | {token_id:8} | {preview!r:18} | {hex_bytes}")
+        finally:
+            engine.close()
+
+    elif args.command == "embed":
+        engine = EmbeddingEngine(args.embedding_model)
+
+        try:
+            vector = engine.embed(args.text)
+
+            print(f"Dimensions: {len(vector)}")
+            print(
+                f"L2 norm: {float(vector @ vector) ** 0.5:.4f}"
+            )
+            print(
+                f"First 8 values: {vector[:8].round(4)}"
+            )
         finally:
             engine.close()
 
