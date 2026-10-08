@@ -113,7 +113,10 @@ def main():
     else:
         from .ui import LabApp
 
-        LabApp(model_path=args.model).run()
+        LabApp(
+            model_path=args.model,
+            embedding_model_path=args.embedding_model,
+        ).run()
 
 
 if __name__ == "__main__":

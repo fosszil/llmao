@@ -8,6 +8,7 @@ from textual.widgets import Footer, Input, Log, Static
 
 from .embeddings import EmbeddingEngine
 from .inference import InferenceEngine
+from .similarity import SemanticIndex, cosine_similarity
 
 
 class LabApp(App):
@@ -32,10 +33,12 @@ class LabApp(App):
 
         self.engine = None
         self.embedder = None
+        self.index = SemanticIndex()
+
         self.history = []
         self.parts = []
-
         self.temp = 0.0
+
         self.busy = True
         self.embedding_active = False
         self.stop_event = Event()
@@ -54,18 +57,6 @@ class LabApp(App):
             f"{message} | Temp {self.temp}"
         )
 
-    @work(thread=True)
-    def load_model(self):
-        try:
-            engine = InferenceEngine(self.model_path)
-            self.call_from_thread(self.model_ready, engine)
-        except Exception as e:
-            self.call_from_thread(self.status, f"Error: {e}")
-
-    def model_ready(self, engine):
-        self.engine = engine
-        self.finish_job()
-
     def start_job(self, message):
         self.busy = True
         self.query_one(Input).disabled = True
@@ -78,6 +69,25 @@ class LabApp(App):
         prompt = self.query_one(Input)
         prompt.disabled = False
         prompt.focus()
+
+    @work(thread=True)
+    def load_model(self):
+        try:
+            engine = InferenceEngine(self.model_path)
+            self.call_from_thread(self.model_ready, engine)
+        except Exception as e:
+            self.call_from_thread(self.status, f"Error: {e}")
+
+    def model_ready(self, engine):
+        self.engine = engine
+        self.finish_job()
+
+    def get_embedder(self):
+        # Load the embedding model once and reuse it.
+        if self.embedder is None:
+            self.embedder = EmbeddingEngine(self.embedding_model_path)
+
+        return self.embedder
 
     def on_input_submitted(self, event: Input.Submitted):
         raw = event.value.lstrip()
@@ -107,30 +117,41 @@ class LabApp(App):
 
         elif text == "/help":
             log.write_line(
-                "/clear  /help  /temp 0.7  /tokens TEXT"
-                "  /context  /embed TEXT"
+                "/clear  /help  /temp N  /tokens TEXT  /context"
+            )
+            log.write_line(
+                "/embed TEXT  /similarity A | B"
+            )
+            log.write_line(
+                "/add TEXT  /search QUERY  /notes"
             )
 
         elif text.startswith("/temp "):
             try:
                 value = float(text[len("/temp "):])
+
                 if not 0 <= value <= 2:
                     raise ValueError
 
                 self.temp = value
                 self.status("Ready")
+
             except ValueError:
                 log.write_line("Temperature must be 0 to 2")
 
         elif text.startswith("/tokens "):
             try:
-                rows = self.engine.inspect_tokens(raw[len("/tokens "):])
+                rows = self.engine.inspect_tokens(
+                    raw[len("/tokens "):]
+                )
+
                 log.write_line(f"\n{len(rows)} tokens")
 
                 for index, token_id, piece, _ in rows:
                     log.write_line(
                         f"{index:3}  {token_id:8}  {piece!r}"
                     )
+
             except Exception as e:
                 log.write_line(f"Tokenization error: {e}")
 
@@ -146,23 +167,107 @@ class LabApp(App):
             )
 
             if remaining < 0:
-                log.write_line(
-                    "Older turns may need to be trimmed."
-                )
+                log.write_line("Older turns may be trimmed.")
 
-        elif text == "/embed" or text.startswith("/embed "):
-            source = raw[len("/embed"):].strip()
+        elif text == "/notes":
+            if not self.index.notes:
+                log.write_line("No notes added yet.")
+            else:
+                for i, note in enumerate(self.index.notes, 1):
+                    log.write_line(f"{i}. {note}")
 
-            if not source:
-                log.write_line("Usage: /embed TEXT")
+        elif text == "/similarity" or text.startswith("/similarity "):
+            source = raw[len("/similarity"):].strip()
+            first, separator, second = source.partition("|")
+
+            if not separator or not first.strip() or not second.strip():
+                log.write_line("Usage: /similarity TEXT1 | TEXT2")
                 return
 
-            self.embedding_active = True
-            self.start_job("Embedding...")
-            self.create_embedding(source)
+            self.start_embedding(
+                "similarity", first.strip(), second.strip()
+            )
+
+        elif text.split(" ", 1)[0] in ("/embed", "/add", "/search"):
+            command, _, source = raw.partition(" ")
+            source = source.strip()
+
+            if not source:
+                log.write_line(f"Usage: {command} TEXT")
+                return
+
+            if command == "/search" and not self.index.notes:
+                log.write_line("No notes yet. Use /add first.")
+                return
+
+            self.start_embedding(command[1:], source)
 
         else:
             log.write_line("Unknown command. Try /help")
+
+    def start_embedding(self, action, text, other=None):
+        self.embedding_active = True
+        self.start_job(f"{action.capitalize()}...")
+        self.embedding_job(action, text, other)
+
+    @work(thread=True)
+    def embedding_job(self, action, text, other):
+        try:
+            embedder = self.get_embedder()
+
+            if action == "embed":
+                vector = embedder.embed(text)
+
+                result = (
+                    f"\nDimensions: {len(vector)}\n"
+                    f"First 8: {vector[:8].round(4)}\n"
+                    f"Norm: {float(vector @ vector) ** 0.5:.4f}"
+                )
+
+            elif action == "similarity":
+                a = embedder.embed(text)
+                b = embedder.embed(other)
+
+                score = cosine_similarity(a, b)
+                result = f"\nCosine similarity: {score:.4f}"
+
+            elif action == "add":
+                vector = embedder.embed(text)
+
+                # Store notes on the UI thread.
+                number = self.call_from_thread(
+                    self.index.add, text, vector
+                )
+                result = f"\nAdded note #{number}"
+
+            elif action == "search":
+                # BGE recommends this prefix for retrieval queries.
+                instruction = (
+                    "Represent this sentence for "
+                    "searching relevant passages: "
+                )
+
+                vector = embedder.embed(instruction + text)
+                matches = self.index.search(vector, top_k=3)
+
+                lines = ["\nTop matches:"]
+
+                for number, note, score in matches:
+                    lines.append(
+                        f"{number}. [{score:.4f}] {note}"
+                    )
+
+                result = "\n".join(lines)
+
+        except Exception as e:
+            result = f"Error: {e}"
+
+        self.call_from_thread(self.embedding_done, result)
+
+    def embedding_done(self, result):
+        self.query_one(Log).write_line(result)
+        self.embedding_active = False
+        self.finish_job()
 
     @work(thread=True)
     def generate(self, question, history, temp):
@@ -176,6 +281,7 @@ class LabApp(App):
                 should_stop=self.stop_event.is_set,
             ):
                 self.call_from_thread(self.add_chunk, chunk)
+
         except Exception as e:
             error = str(e)
 
@@ -211,36 +317,8 @@ class LabApp(App):
         log.write("\n")
         self.finish_job()
 
-    @work(thread=True)
-    def create_embedding(self, text):
-        try:
-            # Load only on the first embedding request.
-            if self.embedder is None:
-                self.embedder = EmbeddingEngine(
-                    self.embedding_model_path
-                )
-
-            vector = self.embedder.embed(text)
-
-            result = (
-                f"\nEmbedding: {text}\n"
-                f"Dimensions: {len(vector)}\n"
-                f"First 8: {vector[:8].round(4)}\n"
-                f"Norm: {float(vector @ vector) ** 0.5:.4f}"
-            )
-
-        except Exception as e:
-            result = f"Embedding error: {e}"
-
-        self.call_from_thread(self.embedding_done, result)
-
-    def embedding_done(self, result):
-        self.query_one(Log).write_line(result)
-        self.embedding_active = False
-        self.finish_job()
-
     def action_stop(self):
-        # Escape only stops text generation, not embeddings.
+        # Escape stops generation, not embedding operations.
         if self.busy and self.engine and not self.embedding_active:
             self.stop_event.set()
             self.status("Stopping...")
